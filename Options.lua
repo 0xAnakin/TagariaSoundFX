@@ -199,6 +199,32 @@ end
 -- Proc spell list
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- Per-event spell lists (shown for events that use one)
+-- ---------------------------------------------------------------------------
+
+local SPELL_LIST_META = {
+	Proc = {
+		dbKey    = "procSpells",
+		header   = "Proc spells (buffs on you that trigger the sound)",
+		addLabel = "Spell name (e.g. Crusader) or spell ID, then press Enter",
+		note     = "Procs are read from your own auras. In content where the client hides aura data, some procs may not be detected.",
+	},
+	Interrupt = {
+		dbKey    = "interruptSpells",
+		header   = "Interrupt / silence spells (extra entries beyond the built-ins)",
+		addLabel = "Spell name (e.g. Silence) or spell ID, then press Enter",
+		note     = "Built-in: Kick, Pummel, Shield Bash, Counterspell, Earth Shock, Spell Lock, Silence (all ranks). " ..
+			"Interrupts are detected directly; silences are detected when you land them on your target.",
+	},
+}
+
+local function CurrentSpellList()
+	local meta = SPELL_LIST_META[selectedEventKey]
+	if not meta then return nil, nil end
+	return ns.db[meta.dbKey], meta
+end
+
 local procScroll, procContent
 local procRows = {}
 
@@ -220,7 +246,7 @@ local function SpellDisplay(entry)
 end
 
 local function LayoutProcRows()
-	local spells = ns.db.procSpells
+	local spells = select(1, CurrentSpellList()) or {}
 	for i, row in ipairs(procRows) do
 		if i <= #spells then
 			row.text:SetText(SpellDisplay(spells[i]))
@@ -254,9 +280,11 @@ local function CreateProcRows(parent)
 		local remove = CreateSmallButton(row, "X", 24)
 		remove:SetPoint("RIGHT", -2, 0)
 		remove:SetScript("OnClick", function()
-			if row.index then
-				table.remove(ns.db.procSpells, row.index)
+			local spells = select(1, CurrentSpellList())
+			if row.index and spells then
+				table.remove(spells, row.index)
 				ns.RebuildProcLookups()
+				ns.RebuildInterruptLookups()
 				LayoutProcRows()
 			end
 		end)
@@ -294,15 +322,17 @@ local function AddSoundEntry(name)
 end
 
 local function AddProcEntry(value)
-	local spells = ns.db.procSpells
+	local spells = select(1, CurrentSpellList())
+	if not spells then return false end
 	if #spells >= 20 then
-		ns.Print("the proc list is full (20 entries).")
+		ns.Print("that spell list is full (20 entries).")
 		return false
 	end
 	value = strtrim(tostring(value or ""))
 	if value == "" then return false end
 	spells[#spells + 1] = tonumber(value) or value
 	ns.RebuildProcLookups()
+	ns.RebuildInterruptLookups()
 	LayoutProcRows()
 	if ns.RefreshOptions then ns.RefreshOptions() end
 	return true
@@ -425,10 +455,16 @@ local function BuildPanel()
 		function() ns.db.streakWindow = math.min(30, (tonumber(ns.db.streakWindow) or 8) + 1) end)
 	AddControl(streakStepper)
 
+	local pvpDeathStepper = CreateStepper(panel, streakStepper, "PvP death window (player damage before dying counts)",
+		function() return tostring(ns.db.pvpDeathWindow) .. "s" end,
+		function() ns.db.pvpDeathWindow = math.max(2, (tonumber(ns.db.pvpDeathWindow) or 15) - 1) end,
+		function() ns.db.pvpDeathWindow = math.min(60, (tonumber(ns.db.pvpDeathWindow) or 15) + 1) end)
+	AddControl(pvpDeathStepper)
+
 	-- Event setup -----------------------------------------------------------
 
 	local setup = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-	setup:SetPoint("TOPLEFT", streakStepper, "BOTTOMLEFT", -2, -10)
+	setup:SetPoint("TOPLEFT", pvpDeathStepper, "BOTTOMLEFT", -2, -10)
 	setup:SetText("Event setup")
 
 	local eventLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormal")
@@ -552,16 +588,22 @@ local function BuildPanel()
 		soundHeader:SetText(("Sounds for %s (%d - one is picked at random)"):format(SelectedEvent().label, count))
 		if count > 0 then testEventBtn:Enable() else testEventBtn:Disable() end
 
-		local isProc = (selectedEventKey == "Proc")
-		procHeader:SetShown(isProc)
-		procScroll:SetShown(isProc)
-		procAddLabel:SetShown(isProc)
-		procAddBox:SetShown(isProc)
-		procAddBtn:SetShown(isProc)
-		procStatusLabel:SetShown(isProc)
+		local spellMeta = SPELL_LIST_META[selectedEventKey]
+		local hasSpellList = (spellMeta ~= nil)
+		procHeader:SetShown(hasSpellList)
+		procScroll:SetShown(hasSpellList)
+		procAddLabel:SetShown(hasSpellList)
+		procAddBox:SetShown(hasSpellList)
+		procAddBtn:SetShown(hasSpellList)
+		procStatusLabel:SetShown(hasSpellList)
+		if spellMeta then
+			procHeader:SetText(spellMeta.header)
+			procAddLabel:SetText(spellMeta.addLabel)
+			procStatusLabel:SetText(spellMeta.note)
+			LayoutProcRows()
+		end
 
 		LayoutSoundRows()
-		if isProc then LayoutProcRows() end
 	end
 
 	local function RefreshFooter()

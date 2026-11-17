@@ -50,10 +50,17 @@ ns.EVENTS = {
 	  tip = "You or your pet landed the killing blow on a creature, pet or totem. Usually left off: it plays for every mob you kill." },
 	{ key = "Death",          label = "You Died",                         def = true,
 	  tip = "Plays when you die." },
+	{ key = "DeathByPlayer",  label = "You Died to a Player (PvP Death)", def = true,
+	  tip = "You died to an enemy player, or died within the PvP death window of being damaged by one. " ..
+		"With a combat log every hit from an enemy player counts; on WoW Forever the death recap and active battlegrounds are used." },
 	{ key = "Proc",           label = "Proc / Buff Trigger",              def = true,
 	  tip = "One of the spells on the Proc list (see below) was just applied to you. Add spells by name (e.g. Crusader, Berserking) or spell ID." },
 	{ key = "CritPlayer",     label = "Critical Hit on a Player",         def = false,
 	  tip = "You critically hit an enemy player without killing them. Needs crit detection (combat log, or the experimental 'Watch my target' option)." },
+	{ key = "Interrupt",      label = "Interrupt or Silence",            def = true,
+	  tip = "You successfully interrupted your target's spellcast, or landed a silence on your target. " ..
+		"Interrupts are detected directly (the client reports who interrupted); silences are recognized from the spell list below " ..
+		"(built-in: Kick, Pummel, Shield Bash, Counterspell, Earth Shock, Spell Lock, Silence - add your own too)." },
 	{ key = "Streak2",        label = "Double Kill",                      def = false,
 	  tip = "A second player kill within the streak window. Plays in addition to the kill sound." },
 	{ key = "Streak3",        label = "Triple Kill",                      def = false,
@@ -76,6 +83,7 @@ local MIN_INTERVAL = {
 	KillNPC     = 0.4,
 	CritPlayer  = 1.0,
 	Proc        = 0.75,
+	Interrupt   = 0.5,
 	CombatIn    = 1.0,
 	CombatOut   = 1.0,
 }
@@ -87,6 +95,8 @@ local KB_WINDOW         = 2.5   -- killing blow and honor credit may arrive in e
 local WARMUP            = 5     -- ignore kill credit right after login / loading screens
 local STREAK_DELAY      = 0.3   -- small pause between the kill sound and the streak sound
 local STREAK_MAX_WINDOW = 30
+local INTERRUPT_WINDOW  = 1.5   -- my interrupt spell and the confirmed interrupt may be this far apart
+local DEATH_RECAP_DELAY = 0.5   -- the death recap needs a moment to arrive
 
 -- ---------------------------------------------------------------------------
 -- Defaults and saved variables
@@ -96,11 +106,13 @@ local defaults = {
 	enabled         = true,
 	channel         = "Master",   -- PlaySoundFile channel: "Master" or "SFX"
 	streakWindow    = 8,          -- seconds for double/triple/... kill streaks
+	pvpDeathWindow  = 15,         -- seconds: damaged by an enemy player before dying counts as a PvP death
 	onlyMyKills     = true,       -- in a group, require that I landed the killing blow
 	watchTargetText = false,      -- experimental: watch target's combat text for crits
 	debug           = false,
 	showWelcome     = true,
 	procSpells      = {},         -- spell names or IDs whose application counts as a proc
+	interruptSpells = {},         -- extra interrupt/silence spell names or IDs beyond the built-ins
 	events          = {},
 }
 
@@ -133,6 +145,7 @@ local function MergeDefaults()
 	end
 
 	if type(db.procSpells) ~= "table" then db.procSpells = {} end
+	if type(db.interruptSpells) ~= "table" then db.interruptSpells = {} end
 	ns.db = db
 end
 
@@ -223,6 +236,15 @@ function ns.TriggerEvent(eventKey)
 	return ns.PlayEvent(eventKey)
 end
 
+-- Cheap check used for the frequent early-exit paths: is this event enabled
+-- and does it actually have sounds to play?
+local function EventHasSounds(eventKey)
+	if not db then return false end
+	local ev = db.events[eventKey]
+	if not (ev and ev.enabled) then return false end
+	return ev.sounds ~= nil and #ev.sounds > 0
+end
+
 -- ---------------------------------------------------------------------------
 -- Secret-safe helpers
 -- ---------------------------------------------------------------------------
@@ -302,6 +324,74 @@ local function RebuildProcLookups()
 end
 ns.RebuildProcLookups = RebuildProcLookups
 
+-- ---------------------------------------------------------------------------
+-- Interrupt / silence spell matching
+-- ---------------------------------------------------------------------------
+
+-- Classic-era interrupt and silence spells (rank 1 IDs; higher ranks are
+-- caught through their localized names, which are the same across ranks).
+local BUILTIN_INTERRUPT_IDS = {
+	2973,  -- Kick (Rogue)
+	6554,  -- Pummel (Warrior)
+	72,    -- Shield Bash (Warrior)
+	2139,  -- Counterspell (Mage)
+	8042,  -- Earth Shock (Shaman)
+	24259, -- Spell Lock (Felhunter)
+	15487, -- Silence (Priest)
+}
+
+local interruptIds, interruptNames = {}, {}
+local spellNameCache = {}
+
+local function SpellNameById(spellId)
+	spellId = tonumber(spellId)
+	if not spellId then return end
+	local cached = spellNameCache[spellId]
+	if cached ~= nil then return cached end
+	local name
+	if C_Spell and C_Spell.GetSpellName then
+		local ok, n = pcall(C_Spell.GetSpellName, spellId)
+		if ok and n and not IsSecret(n) then name = n end
+	end
+	if not name and GetSpellInfo then
+		local ok, n = pcall(GetSpellInfo, spellId)
+		if ok and n and not IsSecret(n) then name = n end
+	end
+	spellNameCache[spellId] = name or false
+	return name
+end
+
+local function RebuildInterruptLookups()
+	interruptIds, interruptNames = {}, {}
+	for _, id in ipairs(BUILTIN_INTERRUPT_IDS) do
+		interruptIds[id] = true
+		local name = SpellNameById(id)
+		if name then interruptNames[strtrim(name):lower()] = true end
+	end
+	for _, entry in ipairs(db.interruptSpells or {}) do
+		local id = tonumber(entry)
+		if id then
+			interruptIds[id] = true
+		else
+			interruptNames[strtrim(tostring(entry)):lower()] = true
+		end
+	end
+end
+ns.RebuildInterruptLookups = RebuildInterruptLookups
+
+local function IsInterruptOrSilenceSpell(spellId, name)
+	if spellId and not IsSecret(spellId) then
+		if interruptIds[tonumber(spellId) or -1] then return true end
+		-- Resolve the cast spell's name so other ranks are recognized too.
+		local resolved = SpellNameById(spellId)
+		if resolved and interruptNames[resolved:lower()] then return true end
+	end
+	if name and not IsSecret(name) then
+		if interruptNames[strtrim(tostring(name)):lower()] then return true end
+	end
+	return false
+end
+
 local function MatchesProcSpell(spellId, name)
 	if spellId and not IsSecret(spellId) then
 		if procById[tonumber(spellId) or -1] then return true end
@@ -349,6 +439,7 @@ local pendingKill        -- my killing blow awaiting honor credit: { at, isPlaye
 local lastKillAt = -math.huge
 local recentCritAt = -math.huge -- last crit seen through target combat text
 local streakTimes = {}
+local lastPlayerDamageAt = -math.huge -- last damage I took from an enemy player
 
 local function GetSessionHK()
 	if not GetPVPSessionStats then return nil end
@@ -465,6 +556,87 @@ local function OnMyKillingBlow(isPlayer, name)
 end
 
 -- ---------------------------------------------------------------------------
+-- Death resolution: was it a PvP death?
+-- ---------------------------------------------------------------------------
+
+local function IsInActiveBattlefield()
+	local ok, inBg = pcall(UnitInBattleground, "player")
+	if ok and inBg then return true end
+	local okArena, arena = pcall(IsActiveBattlefieldArena)
+	if okArena and arena then return true end
+	if C_PvP then
+		local okMap, isPvPMap = pcall(function()
+			return (C_PvP.IsPVPMap and C_PvP.IsPVPMap())
+				or (C_PvP.IsInBrawl and C_PvP.IsInBrawl())
+		end)
+		if okMap and isPvPMap then return true end
+	end
+	-- Covers world battlefields (Wintergrasp, Tol Barad) while the battle is on.
+	if GetMaxBattlefieldID and GetBattlefieldStatus then
+		for i = 1, GetMaxBattlefieldID() do
+			local okStatus, status = pcall(GetBattlefieldStatus, i)
+			if okStatus and status == "active" then return true end
+		end
+	end
+	return false
+end
+
+-- true  = a player is among the recorded killing blows,
+-- false = recap readable, no player involved,
+-- nil   = recap unavailable or hidden.
+local function DeathRecapHasPlayer()
+	if not (C_DeathRecap and C_DeathRecap.GetRecapEvents) then return nil end
+	local ok, found = pcall(function()
+		local recap = C_DeathRecap.GetRecapEvents()
+		if type(recap) ~= "table" then return nil end
+		for _, hit in ipairs(recap) do
+			if type(hit) == "table" then
+				local guid = hit.sourceGUID
+				if guid and type(guid) == "string" and not IsSecret(guid) then
+					if guid:find("^Player%-") then return true end
+				end
+			end
+		end
+		return false
+	end)
+	if ok then return found end
+	return nil
+end
+
+-- "Died to an enemy player, or damaged by one shortly before dying."
+-- Returns true when the PvP death event was played.
+local function TryPvPDeath()
+	if not EventHasSounds("DeathByPlayer") then return false end
+
+	if ns.canCombatLog then
+		-- Full knowledge: any enemy player damage inside the window counts.
+		local window = math.min(math.max(tonumber(db.pvpDeathWindow) or 15, 2), 60)
+		if (GetTime() - lastPlayerDamageAt) <= window then
+			return ns.PlayEvent("DeathByPlayer")
+		end
+		return false
+	end
+
+	-- Modern client: battleground deaths are PvP deaths; in the open world the
+	-- death recap tells us who (or what) landed the killing blows.
+	if IsInActiveBattlefield() then
+		Debug("pvp death: active battlefield")
+		return ns.PlayEvent("DeathByPlayer")
+	end
+	local recap = DeathRecapHasPlayer()
+	if recap == true then
+		Debug("pvp death: death recap shows a player")
+		return ns.PlayEvent("DeathByPlayer")
+	end
+	return false
+end
+
+local function ResolveDeath()
+	if TryPvPDeath() then return end
+	ns.TriggerEvent("Death")
+end
+
+-- ---------------------------------------------------------------------------
 -- Combat-log detection (Classic family clients)
 -- ---------------------------------------------------------------------------
 
@@ -483,12 +655,20 @@ local DAMAGE_SUBEVENTS = {
 	DAMAGE_SPLIT           = 10,
 }
 
+-- Aura subevents whose 4th suffix argument is the aura type ("BUFF"/"DEBUFF").
+local SILENCE_AURA_EVENTS = {
+	SPELL_AURA_APPLIED      = true,
+	SPELL_AURA_REFRESH      = true,
+	SPELL_AURA_APPLIED_DOSE = true,
+}
+
 local function ParseCLEU()
 	if not CombatLogGetCurrentEventInfo then return end
 	local _, subevent, arg3 = CombatLogGetCurrentEventInfo()
 	if not subevent then return end
 	local isDamage = DAMAGE_SUBEVENTS[subevent]
-	if subevent ~= "PARTY_KILL" and not isDamage then return end
+	local isSilence = SILENCE_AURA_EVENTS[subevent]
+	if subevent ~= "PARTY_KILL" and subevent ~= "SPELL_INTERRUPT" and not isDamage and not isSilence then return end
 
 	-- Modern layouts pass hideCaster (a boolean) as the 3rd value; very old
 	-- layouts start with the source GUID there instead.
@@ -498,6 +678,27 @@ local function ParseCLEU()
 		_, _, _, srcGUID, _, srcFlags, _, dstGUID, dstName, dstFlags = CombatLogGetCurrentEventInfo()
 	else
 		_, _, srcGUID, _, srcFlags, dstGUID, dstName, dstFlags = CombatLogGetCurrentEventInfo()
+	end
+
+	if subevent == "SPELL_INTERRUPT" then
+		-- Any interrupt spell I (or my pet) landed on someone.
+		if IsMyGUID(srcGUID) then
+			Debug("interrupt landed (combat log)")
+			ns.TriggerEvent("Interrupt")
+		end
+		return
+	end
+
+	if isSilence then
+		-- A debuff I applied: is it one of the interrupt/silence spells?
+		if IsMyGUID(srcGUID) and dstGUID ~= playerGUID then
+			local spellId, spellName, _, auraType = select(prefix + 1, CombatLogGetCurrentEventInfo())
+			if auraType == "DEBUFF" and IsInterruptOrSilenceSpell(spellId, spellName) then
+				Debug("silence landed (combat log): %s", spellName)
+				ns.TriggerEvent("Interrupt")
+			end
+		end
+		return
 	end
 
 	if subevent == "PARTY_KILL" then
@@ -530,6 +731,11 @@ local function ParseCLEU()
 		end
 		RegisterStreak()
 		return
+	end
+
+	-- Damage event: remember hits I take from enemy players (PvP death window).
+	if dstGUID == playerGUID and srcGUID ~= playerGUID and VictimIsPlayer(srcGUID) then
+		lastPlayerDamageAt = GetTime()
 	end
 
 	-- Damage event: track my critical hits.
@@ -605,12 +811,18 @@ end
 local F = CreateFrame("Frame")
 ns.frame = F
 
+-- Interrupt detection state (modern clients).
+local pendingInterruptAt = -math.huge -- I cast an interrupt/silence spell just now
+local pendingChannelAt = nil         -- my target was channeling when I cast it
+local lastInterruptedCastGUID = nil  -- dedupe repeated events for the same cast
+
 local handlers = {}
 
 function handlers.ADDON_LOADED(name)
 	if name ~= ADDON_NAME then return end
 	MergeDefaults()
 	RebuildProcLookups()
+	RebuildInterruptLookups()
 	ApplyWatchTarget()
 	F:UnregisterEvent("ADDON_LOADED")
 
@@ -630,12 +842,23 @@ function handlers.PLAYER_ENTERING_WORLD()
 	pendingKill = nil
 	streakTimes = {}
 	recentCritByVictim, pendingCritByVictim = {}, {}
+	lastPlayerDamageAt = -math.huge
+	pendingInterruptAt = -math.huge
+	pendingChannelAt = nil
+	lastInterruptedCastGUID = nil
 	if db then ApplyWatchTarget() end
 end
 
 function handlers.PLAYER_DEAD()
 	Debug("player died")
-	ns.TriggerEvent("Death")
+	if ns.canCombatLog then
+		ResolveDeath()
+	else
+		-- The death recap needs a moment to arrive on modern clients.
+		pcall(function()
+			C_Timer.After(DEATH_RECAP_DELAY, ResolveDeath)
+		end)
+	end
 end
 
 function handlers.PARTY_KILL(attackerGUID, targetGUID)
@@ -686,23 +909,99 @@ function handlers.CHAT_MSG_COMBAT_HONOR_GAIN()
 end
 
 function handlers.UNIT_AURA(unit, updateInfo)
-	if unit ~= "player" or not db or not db.enabled then return end
-	if not next(db.procSpells) then return end
+	if not db or not db.enabled then return end
 
-	-- New-or-refreshed auras are handed to us directly on modern clients.
-	if type(updateInfo) == "table" and type(updateInfo.addedAuras) == "table" then
+	if unit == "player" then
+		-- Procs: tracked buffs applied to me.
+		if not next(db.procSpells) then return end
+
+		-- New-or-refreshed auras are handed to us directly on modern clients.
+		if type(updateInfo) == "table" and type(updateInfo.addedAuras) == "table" then
+			for _, aura in ipairs(updateInfo.addedAuras) do
+				local ok, err = pcall(function()
+					-- Check IsSecret BEFORE any truthiness test: boolean secrets
+					-- may not be tested directly.
+					if IsSecret(aura.isHarmful) then return end
+					if aura.isHarmful then return end
+					if MatchesProcSpell(aura.spellId, aura.name) then
+						OnProcSpell(aura.spellId, aura.name)
+					end
+				end)
+				if not ok then Debug("aura error: %s", err) end
+			end
+		else
+			ScanAuras()
+		end
+		return
+	end
+
+	if unit == "target" then
+		-- Silences I applied to my target (modern clients without a combat log).
+		if ns.canCombatLog or not EventHasSounds("Interrupt") then return end
+		if type(updateInfo) ~= "table" or type(updateInfo.addedAuras) ~= "table" then return end
 		for _, aura in ipairs(updateInfo.addedAuras) do
 			local ok, err = pcall(function()
-				if aura.isHarmful and not IsSecret(aura.isHarmful) then return end
-				if MatchesProcSpell(aura.spellId, aura.name) then
-					OnProcSpell(aura.spellId, aura.name)
+				if IsSecret(aura.isHarmful) then return end
+				if not aura.isHarmful then return end
+				local source = aura.sourceUnit
+				local mine = source and not IsSecret(source)
+					and (source == "player" or source == "pet" or source == "vehicle")
+				if not mine and aura.sourceGUID then
+					mine = IsMyGUID(aura.sourceGUID)
+				end
+				if mine and IsInterruptOrSilenceSpell(aura.spellId, aura.name) then
+					Debug("silence landed: %s", aura.name)
+					ns.TriggerEvent("Interrupt")
 				end
 			end)
-			if not ok then Debug("aura error: %s", err) end
+			if not ok then Debug("target aura error: %s", err) end
 		end
-	else
-		ScanAuras()
 	end
+end
+
+-- My interrupt/silence spell was cast successfully (modern clients).
+function handlers.UNIT_SPELLCAST_SUCCEEDED(unit, castGUID, spellID)
+	if ns.canCombatLog or (unit ~= "player" and unit ~= "pet") then return end
+	if not EventHasSounds("Interrupt") then return end
+	if not spellID or IsSecret(spellID) then return end
+	if not IsInterruptOrSilenceSpell(spellID) then return end
+	pendingInterruptAt = GetTime()
+	-- If the target is channeling right now, an interrupt would stop it.
+	local ok, channel = pcall(UnitChannelInfo, "target")
+	pendingChannelAt = (ok and channel) and pendingInterruptAt or nil
+	Debug("interrupt spell cast (%s)", spellID)
+end
+
+-- A target's cast got interrupted; the modern client reports who did it.
+function handlers.UNIT_SPELLCAST_INTERRUPTED(unit, castGUID, spellID, interruptedBy)
+	if ns.canCombatLog or not EventHasSounds("Interrupt") then return end
+	if castGUID and not IsSecret(castGUID) then
+		if castGUID == lastInterruptedCastGUID then return end
+		lastInterruptedCastGUID = castGUID
+	end
+
+	local mine
+	if interruptedBy and not IsSecret(interruptedBy) then
+		mine = IsMyGUID(interruptedBy)
+	else
+		-- Attribution hidden: fall back to "I just cast an interrupt spell".
+		mine = (GetTime() - pendingInterruptAt) <= INTERRUPT_WINDOW
+	end
+	if mine then
+		Debug("interrupt landed (interruptedBy: %s)", SafeTostring(interruptedBy))
+		ns.TriggerEvent("Interrupt")
+	end
+end
+
+-- Kicking a channeled spell stops the channel; correlate with my recent cast.
+function handlers.UNIT_SPELLCAST_CHANNEL_STOPPED(unit)
+	if ns.canCombatLog or not EventHasSounds("Interrupt") then return end
+	if not pendingChannelAt then return end
+	if (GetTime() - pendingInterruptAt) <= INTERRUPT_WINDOW then
+		Debug("interrupt landed (channel stopped)")
+		ns.TriggerEvent("Interrupt")
+	end
+	pendingChannelAt = nil
 end
 
 function handlers.COMBAT_TEXT_UPDATE(messageType)
@@ -756,9 +1055,8 @@ for _, event in ipairs({
 	TryRegister(event)
 end
 
--- Auras are only interesting on the player: use the unit-scoped registration
--- when the client offers it.
-TryRegisterUnitEvent("UNIT_AURA", "player")
+-- Auras: procs on the player, silences on the target.
+TryRegisterUnitEvent("UNIT_AURA", "player", "target")
 
 -- Client-dependent signals. Registration itself is the capability check:
 -- the modern client forbids the combat log, classic clients have no
@@ -774,6 +1072,14 @@ end
 ns.canCombatLog = usesCombatLog
 ns.canHKCredit = TryRegister("PLAYER_PVP_KILLS_CHANGED")
 
+-- Spellcast signals for interrupt/silence detection (modern clients; the
+-- classic path uses the combat log registered above).
+ns.canCastSucceeded = not usesCombatLog and TryRegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "pet") or false
+ns.canCastEvents = not usesCombatLog and TryRegisterUnitEvent("UNIT_SPELLCAST_INTERRUPTED", "target", "focus") or false
+if not usesCombatLog then
+	TryRegisterUnitEvent("UNIT_SPELLCAST_CHANNEL_STOPPED", "target")
+end
+
 -- ---------------------------------------------------------------------------
 -- Public helpers used by the options panel and slash commands
 -- ---------------------------------------------------------------------------
@@ -787,6 +1093,13 @@ local function KillSoundsAvailable(eventKey)
 		return false, "needs 'Watch my target' or a combat-log client"
 	elseif eventKey == "Death" or eventKey == "CombatIn" or eventKey == "CombatOut" then
 		return true
+	elseif eventKey == "DeathByPlayer" then
+		if ns.canCombatLog then return true, "any enemy player damage in the window counts" end
+		return true, "death recap and active battlegrounds"
+	elseif eventKey == "Interrupt" then
+		if ns.canCombatLog then return true, "combat log (all interrupt spells)" end
+		if ns.canCastEvents then return true, "your target's interrupted casts and the silences you land" end
+		return false, "no interrupt signal on this client"
 	elseif eventKey == "Proc" then
 		return true
 	elseif eventKey == "Streak2" or eventKey == "Streak3" or eventKey == "Streak4" or eventKey == "Streak5" then

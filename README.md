@@ -51,13 +51,17 @@ where available detection is even better thanks to the combat log.
 | Killing Blow on a Player (Crit) | the killing blow on a player was also a critical hit | on |
 | Killing Blow on a Mob | you (or your pet) kill something that is not a player | off |
 | You Died | you die | on |
+| You Died to a Player (PvP Death) | you die to an enemy player, or within the PvP death window (default 15s) of being damaged by one | on |
 | Proc / Buff Trigger | one of your tracked buffs (see below) is applied to you | on |
 | Critical Hit on a Player | you critically hit an enemy player without killing them | off |
+| Interrupt or Silence | you successfully interrupt a target's cast, or land a silence on your target | on |
 | Double / Triple / Quad / Multi Kill | 2 / 3 / 4 / 5+ player kills inside the streak window (default 8s) | off |
 | Entering / Leaving Combat | you enter or leave combat | off |
 
 Notes:
 
+* If a PvP death is detected, the PvP death sound replaces the plain "You
+  Died" sound (never both).
 * If a variant event (e.g. the crit killing blow) has no sounds configured,
   the base event's sound plays instead. Streak sounds play in addition to the
   kill sound.
@@ -72,6 +76,29 @@ A "proc" is any buff appearing on you whose **spell name** (e.g. `Crusader`,
 `Berserking`) or **spell ID** is on the Proc list. Open `/tsfx`, select the
 **Proc / Buff Trigger** event, add your proc spells, and give the event one
 or more sounds.
+
+### Interrupts and silences
+
+* **Interrupts** are detected directly: the modern client reports *who*
+  interrupted a cast (`UNIT_SPELLCAST_INTERRUPTED` with the interrupter's
+  GUID), and Classic clients report every interrupt through the combat log.
+  Any interrupt spell works — no configuration needed.
+* **Silences** are recognized by spell: a built-in list covers Kick, Pummel,
+  Shield Bash, Counterspell, Earth Shock, Spell Lock and Silence (all ranks,
+  by name and ID), and you can add more in the options under the
+  **Interrupt or Silence** event. On WoW Forever a silence is detected when
+  you land it on your **target**; on Classic clients it works on anyone.
+
+### PvP deaths
+
+* On Classic-family clients every hit you take from an enemy player is
+  remembered: if you die within the **PvP death window** (15 seconds by
+  default, adjustable in the options), the PvP death sound plays instead of
+  the normal death sound.
+* On WoW Forever the addon uses the game's death recap (the same list of
+  killing blows the death recap UI shows) plus active-battleground checks —
+  any death inside a battleground or arena counts as a PvP death. When the
+  client hides the recap's sources, the plain death sound plays.
 
 ---
 
@@ -116,6 +143,8 @@ compartment button near the minimap (right-click it to toggle the addon on/off).
   or *Sound Effects volume*.
 * **Kill streak window** — seconds in which consecutive player kills count
   as Double/Triple/Quad/Multi kills.
+* **PvP death window** — seconds in which enemy player damage before dying
+  still counts as a death to a player (15 by default).
 * Per event: enable/disable, sound list with **Test** / **X** (remove),
   **Add** by file name, and a per-event detectability status line.
 
