@@ -1,8 +1,8 @@
 # Tagaria SoundFX
 
 A WoW Forever addon that plays **your own sounds** (.mp3 / .wav) when combat
-events happen: you killed a player, you killed someone **with a critical hit**,
-you died, a proc triggered, and more.
+events happen: you killed a player, you died, a proc triggered, you got
+crowd controlled, and more.
 
 Each event has its own **list of sounds** — when an event fires, one is picked
 **at random** (a single sound in the list always plays that one).
@@ -48,13 +48,13 @@ where available detection is even better thanks to the combat log.
 | Event | Plays when | Default |
 |---|---|---|
 | Killing Blow on a Player | you (or your pet) land the killing blow on an enemy player | on |
-| Killing Blow on a Player (Crit) | the killing blow on a player was also a critical hit | on |
 | Killing Blow on a Mob | you (or your pet) kill something that is not a player | off |
 | You Died | you die | on |
 | You Died to a Player (PvP Death) | you die to an enemy player, or within the PvP death window (default 15s) of being damaged by one | on |
 | Proc / Buff Trigger | one of your tracked buffs (see below) is applied to you | on |
 | Critical Hit on a Player | you critically hit an enemy player without killing them | off |
 | Interrupt or Silence | you successfully interrupt a target's cast, or land a silence on your target | on |
+| You Got Crowd Controlled | you are feared, rooted, stunned, polymorphed, slept, sapped, charmed or mind controlled | on |
 | Double / Triple / Quad / Multi Kill | 2 / 3 / 4 / 5+ player kills inside the streak window (default 8s) | off |
 | Entering / Leaving Combat | you enter or leave combat | off |
 
@@ -62,9 +62,7 @@ Notes:
 
 * If a PvP death is detected, the PvP death sound replaces the plain "You
   Died" sound (never both).
-* If a variant event (e.g. the crit killing blow) has no sounds configured,
-  the base event's sound plays instead. Streak sounds play in addition to the
-  kill sound.
+* Streak sounds play in addition to the kill sound.
 * Honorable kills are what the game credits to you (green-level or higher
   enemies, world PvP / battlegrounds). Kills of gray enemies give no credit,
   so on the WoW Forever client they are only detected when the client lets
@@ -88,6 +86,15 @@ or more sounds.
   by name and ID), and you can add more in the options under the
   **Interrupt or Silence** event. On WoW Forever a silence is detected when
   you land it on your **target**; on Classic clients it works on anyone.
+
+### Crowd control
+
+Plays when a crowd control effect lands on you: fears, roots, stuns,
+polymorphs, sleep, sap, charm / mind control, daze and paralysis. It is
+matched by the effect's type (the client's CC "mechanic": feared, rooted,
+stunned, polymorph, ...) and by its name, so it works on any client that
+exposes aura data — on WoW Forever and on Classic-family clients. Silence
+and snares are **not** crowd control (you can still act or move).
 
 ### PvP deaths
 
@@ -114,16 +121,18 @@ therefore uses the supported replacement signals:
 * **Your death** — `PLAYER_DEAD`. Always works.
 * **Procs** — your own aura data (`UNIT_AURA`), read through
   secret-value-safe guards.
-* **Crit hits / crit killing blows** — the client does not expose your
-  *outgoing* crits. The optional, experimental **"Watch my target's combat
-  text"** option tells the game to watch your **target** for floating combat
-  text; when your target takes a critical hit (usually from you), the crit
-  events can fire. Side effect: your own floating combat text then shows your
-  target's damage taken instead, so leave it off if you use the built-in
-  floating combat text.
-* On **Classic family clients** (which still have a combat log), kills,
-  crit hits and crit killing blows are detected directly from the combat log —
-  fully and without the experiment above.
+* **Crowd control** — your own aura data (`UNIT_AURA`) again, matched by the
+  CC mechanic of the effect that lands on you (fear, root, stun, polymorph,
+  mind control, ...) with a name fallback.
+* **Crit hits** — the client does not expose your *outgoing* crits. The
+  optional, experimental **"Watch my target's combat text"** option tells the
+  game to watch your **target** for floating combat text; when your target
+  takes a critical hit (usually from you), the crit event can fire. Side
+  effect: your own floating combat text then shows your target's damage taken
+  instead, so leave it off if you use the built-in floating combat text.
+* On **Classic family clients** (which still have a combat log), kills and
+  crit hits are detected directly from the combat log — fully and without the
+  experiment above.
 
 Enable **debug mode** (`/tsfx debug`) to see every signal the addon receives;
 restricted values are shown as `<secret>`.
@@ -135,7 +144,8 @@ restricted values are shown as `<secret>`.
 Open with `/tsfx`, Esc → Options → AddOns → Tagaria SoundFX, or the addon
 compartment button near the minimap (right-click it to toggle the addon on/off).
 
-* **Enabled** — master switch.
+* **Enabled** — master switch: turning it on enables every event, turning
+  it off disables every event.
 * **Only my killing blows** — in a group, stay silent for kills a group
   member finished off (when the client can tell who it was). If the client
   can't tell, the kill still counts.

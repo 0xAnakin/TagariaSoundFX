@@ -2,7 +2,7 @@
 ## Title: Tagaria SoundFX
 ## Notes: Play your own .mp3/.wav sounds when you kill players, land crits, die, proc and more.
 ## Author: 0xAnakin
-## Version: 1.0.0
+## Version: 1.5.6
 ## SavedVariables: TagariaSoundFXDB
 ## IconTexture: Interface\Icons\INV_Misc_Drum_01
 ## AddonCompartmentFunc: TagariaSoundFX_OnCompartmentClick

@@ -12,7 +12,7 @@
 
 local ADDON_NAME, ns = ...
 ns.ADDON_NAME = ADDON_NAME
-ns.VERSION = "1.0.0"
+ns.VERSION = "1.5.6"
 
 local VERSION = ns.VERSION
 
@@ -20,15 +20,25 @@ local VERSION = ns.VERSION
 -- Client detection
 -- ---------------------------------------------------------------------------
 
+-- GetBuildInfo() returns version, build, date, tocversion; pcall prepends its
+-- own "ok", so the interface number is the FIFTH value.
 local INTERFACE = 0
 do
-	local ok, _, _, toc = pcall(GetBuildInfo)
+	local ok, _, _, _, toc = pcall(GetBuildInfo)
 	if ok then INTERFACE = tonumber(toc) or 0 end
 end
 
 -- Modern engine clients: retail Midnight (12.x) and WoW Forever (1.60.x,
 -- interface 16001). These have no addon combat log and use secret values.
 local IS_MODERN = INTERFACE >= 120000 or (INTERFACE >= 16000 and INTERFACE < 20000)
+
+-- Hard evidence of the restricted modern engine (12.x / WoW Forever): these
+-- exist there and not on Classic-family clients. Registering the combat log
+-- event is a FORBIDDEN action on the modern engine (the "blocked from an
+-- action only available to the Blizzard UI" popup), so it must never be
+-- attempted when this evidence is present, whatever the interface number says.
+local HAS_RESTRICTED_ENGINE = (C_CombatLog ~= nil) or (issecretvalue ~= nil)
+
 ns.IS_MODERN = IS_MODERN
 ns.INTERFACE = INTERFACE
 
@@ -39,28 +49,44 @@ ns.SOUND_FOLDER = SOUND_FOLDER
 -- Event definitions
 -- ---------------------------------------------------------------------------
 
--- def  : enabled by default
--- tips : options tooltip
+-- def          : enabled by default
+-- defaultSound : seeded into the sound list on first run (once)
+-- tip          : options tooltip
 ns.EVENTS = {
 	{ key = "KillPlayer",     label = "Killing Blow on a Player",         def = true,
+	  defaultSound = "etsi-kopio.mp3",
 	  tip = "Plays when you land a killing blow on an enemy player. Uses Blizzard's kill credit (honorable kills) and the PARTY_KILL event. Kills that give no honor (gray enemies) are only detected when the client can tell who you killed." },
-	{ key = "KillPlayerCrit", label = "Killing Blow on a Player (Crit)",  def = true,
-	  tip = "A killing blow on a player that was also a critical hit. Needs crit detection (combat log, or the experimental 'Watch my target' option); otherwise the normal killing blow sound plays." },
 	{ key = "KillNPC",        label = "Killing Blow on a Mob",            def = false,
 	  tip = "You or your pet landed the killing blow on a creature, pet or totem. Usually left off: it plays for every mob you kill." },
 	{ key = "Death",          label = "You Died",                         def = true,
 	  tip = "Plays when you die." },
 	{ key = "DeathByPlayer",  label = "You Died to a Player (PvP Death)", def = true,
+	  defaultSound = "poutanas-vasana.mp3",
 	  tip = "You died to an enemy player, or died within the PvP death window of being damaged by one. " ..
 		"With a combat log every hit from an enemy player counts; on WoW Forever the death recap and active battlegrounds are used." },
 	{ key = "Proc",           label = "Proc / Buff Trigger",              def = true,
-	  tip = "One of the spells on the Proc list (see below) was just applied to you. Add spells by name (e.g. Crusader, Berserking) or spell ID." },
-	{ key = "CritPlayer",     label = "Critical Hit on a Player",         def = false,
-	  tip = "You critically hit an enemy player without killing them. Needs crit detection (combat log, or the experimental 'Watch my target' option)." },
+	  defaultSound = "1-6.mp3",
+	  tip = "A proc just applied to you, your target, or one of your allies. " ..
+		"The current Forever proc talents are detected by default: Bloodthrill, Weaponmaster, Enrage, Flurry, " ..
+		"Blood Craze, Gore Drinker, Unbridled Wrath, Redoubt, Reckoning, Vengeance, Unsealed Wrath, Deadly Aspects, " ..
+		"Frenzy, Expose Prey, Remorseless Attacks, Quick Getaway, Spirit Tap, Elemental Focus, Maelstrom Weapon, " ..
+		"Fingers of Frost, Frostbite, Missile Barrage, Heating Up, Nightfall, Oomen of Clarity, Nature's Grace, " ..
+		"Eclipse, and the weapon enchants (Crusader, Revelation, Insight, Recovery, Lifestealing, Fiery Weapon, " ..
+		"Unholy Weapon, Icy Chill). Procs with no aura (extra attacks, instant energy, free casts, " ..
+		"Seal of Command's bonus hit) cannot be detected this way. Add more in the options (PROC SPELLS) by name or spell ID." },
+	{ key = "CritPlayer",     label = "Critical Hit on a Player",         def = true,
+	  defaultSound = "kopio.mp3",
+	  tip = "You critically hit an enemy player without killing them. Needs crit detection (combat log, or the experimental 'Watch my target' option on WoW Forever); without it this event never fires." },
 	{ key = "Interrupt",      label = "Interrupt or Silence",            def = true,
+	  defaultSound = "poniros.mp3",
 	  tip = "You successfully interrupted your target's spellcast, or landed a silence on your target. " ..
 		"Interrupts are detected directly (the client reports who interrupted); silences are recognized from the spell list below " ..
 		"(built-in: Kick, Pummel, Shield Bash, Counterspell, Earth Shock, Spell Lock, Silence - add your own too)." },
+	{ key = "CrowdControl",   label = "You Got Crowd Controlled",        def = true,
+	  defaultSound = "germaniki.mp3",
+	  tip = "Plays when you are crowd controlled: feared, rooted, stunned, polymorphed, slept, sapped, " ..
+		"charmed or mind controlled, dazed or paralysed. Detected from the CC effect that lands on you " ..
+		"(by its effect type and name). Silence and snares are not crowd control." },
 	{ key = "Streak2",        label = "Double Kill",                      def = false,
 	  tip = "A second player kill within the streak window. Plays in addition to the kill sound." },
 	{ key = "Streak3",        label = "Triple Kill",                      def = false,
@@ -80,16 +106,16 @@ for _, event in ipairs(ns.EVENTS) do ns.EVENT_BY_KEY[event.key] = event end
 
 -- Minimum seconds between two plays of the same (spammy) event.
 local MIN_INTERVAL = {
-	KillNPC     = 0.4,
-	CritPlayer  = 1.0,
-	Proc        = 0.75,
-	Interrupt   = 0.5,
-	CombatIn    = 1.0,
-	CombatOut   = 1.0,
+	KillNPC      = 0.4,
+	CritPlayer   = 1.0,
+	Proc         = 0.75,
+	Interrupt    = 0.5,
+	CrowdControl = 1.0,
+	CombatIn     = 1.0,
+	CombatOut    = 1.0,
 }
 
 -- Seconds after which combat text crits / kill attributions are considered stale.
-local CRIT_WINDOW       = 0.8   -- recent crit that can upgrade a kill to a crit kill
 local KILL_DEDUPE       = 2.5   -- several signals for the same kill collapse into one sound
 local KB_WINDOW         = 2.5   -- killing blow and honor credit may arrive in either order
 local WARMUP            = 5     -- ignore kill credit right after login / loading screens
@@ -142,6 +168,30 @@ local function MergeDefaults()
 		end
 		if ev.enabled == nil then ev.enabled = event.def end
 		if type(ev.sounds) ~= "table" then ev.sounds = {} end
+	end
+
+	-- Seed built-in default sounds into events that have one, exactly once
+	-- per event: if the user later removes it, it stays removed.
+	if type(db.seededDefaults) ~= "table" then db.seededDefaults = {} end
+	for _, event in ipairs(ns.EVENTS) do
+		if event.defaultSound and not db.seededDefaults[event.key] then
+			db.seededDefaults[event.key] = true
+			local ev = db.events[event.key]
+			if type(ev.sounds) == "table" and #ev.sounds == 0 then
+				ev.sounds[1] = event.defaultSound
+			end
+		end
+	end
+
+	-- One-time migration: the built-in default for KillPlayer changed from
+	-- kopio.mp3 to etsi-kopio.mp3. Swap any already-seeded copy so existing
+	-- characters pick up the new default. Idempotent - once swapped there is
+	-- nothing left to replace, so this is a no-op on later loads.
+	local killPlayer = db.events["KillPlayer"]
+	if type(killPlayer) == "table" and type(killPlayer.sounds) == "table" then
+		for i, name in ipairs(killPlayer.sounds) do
+			if name == "kopio.mp3" then killPlayer.sounds[i] = "etsi-kopio.mp3" end
+		end
 	end
 
 	if type(db.procSpells) ~= "table" then db.procSpells = {} end
@@ -305,24 +355,78 @@ local function VictimIsPlayer(guid)
 end
 
 -- ---------------------------------------------------------------------------
--- Proc list
+-- Proc detection
 -- ---------------------------------------------------------------------------
 
-local procById, procByName = {}, {}
-local lastProcAt = {}
+-- Famous procs, built in: their spell IDs are matched on your own auras, and
+-- their names cover renamed / localized / re-ID'd variants (Forever gives
+-- new content its own spell IDs). The user's own Proc spell list
+-- (db.procSpells) is merged on top of these.
+local BUILTIN_PROC_IDS = {
+	2068,    -- Enrage
+	28251,   -- Fingers of Frost (Mage, classic buff)
+	34428,   -- Flurry
+	17941,   -- Shadow Trance, Nightfall's proc (Warlock)
+	1900,    -- Crusader weapon enchant proc
+	31072,   -- Holy Strength (Crusader buff)
+	8217,    -- Revelation weapon enchant proc (Forever)
+	16870,   -- Clearcasting, Oomen of Clarity's proc (Druid)
+	1898,    -- Lifestealing weapon enchant proc
+	803,     -- Fiery Weapon enchant proc
+}
 
-local function RebuildProcLookups()
-	procById, procByName = {}, {}
-	for _, entry in ipairs(db.procSpells) do
-		local id = tonumber(entry)
-		if id then
-			procById[id] = true
-		else
-			procByName[strtrim(tostring(entry)):lower()] = true
-		end
-	end
-end
-ns.RebuildProcLookups = RebuildProcLookups
+-- The list follows the current Forever talent trees (verified against the
+-- client data, build 1.60.1.x). Many procs (extra attacks, instant energy,
+-- free casts) have no aura at all; the names are kept because a name that
+-- never matches costs nothing.
+local BUILTIN_PROC_NAMES = {
+	-- Warrior
+	"bloodthrill", "enrage", "flurry", "blood craze", "gore drinker",
+	"weaponmaster", "unbridled wrath",
+	-- Paladin
+	"redoubt", "reckoning", "vengeance", "unsealed wrath",
+	-- Hunter
+	"deadly aspects", "frenzy", "expose prey", "mongoose bite",
+	-- Rogue
+	"remorseless attacks", "quick getaway", "seal fate", "hack and slash",
+	"setup", "puncturing wounds", "relentless strikes",
+	-- Priest
+	"spirit tap", "searing light",
+	-- Shaman
+	"elemental focus", "lightning overload", "maelstrom weapon",
+	-- Mage
+	"fingers of frost", "missile barrage", "heating up", "clearcasting",
+	-- Warlock
+	"nightfall", "shadow trance",
+	-- Druid
+	"nature's grace", "eclipse", "natural reaction",
+	-- Racial
+	"berserking", "blood fury",
+	-- Weapon enchants (the complete set in Forever)
+	"crusader", "holy strength", "revelation", "insight", "recovery",
+	"lifestealing", "fiery weapon",
+}
+
+-- Procs that land on someone else instead of on you (harmful effects from me:
+-- Frostbite's root, CC procs, weapon enchant procs).
+local BUILTIN_PROC_TARGET_IDS = {
+	12494,   -- Frostbite (Mage) - the root on your target
+	1899,    -- Unholy Weapon enchant - the curse on the target
+	1894,    -- Icy Chill enchant - the slow on the target
+}
+
+local BUILTIN_PROC_TARGET_NAMES = {
+	"frostbite",
+	"concussive shot",  -- Hunter: stun on the target
+	"entrapment",       -- Hunter: immobilize from traps
+	"blackout",         -- Priest: stun on the target
+	"icy chill", "icy weapon",
+	"unholy", "unholy weapon",
+}
+
+local procById, procByName = {}, {}
+local procTargetById, procTargetByName = {}, {}
+local lastProcAt = {}
 
 -- ---------------------------------------------------------------------------
 -- Interrupt / silence spell matching
@@ -392,12 +496,117 @@ local function IsInterruptOrSilenceSpell(spellId, name)
 	return false
 end
 
+-- ---------------------------------------------------------------------------
+-- Crowd control detection
+-- ---------------------------------------------------------------------------
+
+-- CC effects that count as being crowd controlled. The mechanic IDs are the
+-- robust path (every rank and localization shares them); the names are a
+-- fallback for clients that hide mechanic data. Silence and snares are NOT
+-- crowd control (you can still act / move).
+local CC_MECHANICS = {
+	[4]  = true,  -- Disorient
+	[6]  = true,  -- Feared
+	[16] = true,  -- Mind Control (charm, dominate)
+	[19] = true,  -- Paralysis
+	[21] = true,  -- Polymorph
+	[22] = true,  -- Rooted
+	[23] = true,  -- Sap
+	[28] = true,  -- Stunned
+	[40] = true,  -- Dazed
+}
+
+-- Fallback names (lowercased, exact) for clients without mechanic data.
+local CC_NAMES = {
+	"fear", "dazzling fear", "terror", "panic", "psychic scream",
+	"root", "frostbite", "entangling roots", "web", "entrapment",
+	"stun", "concussive shot", "hex", "hexed",
+	"sleep", "sap", "mind control", "charm", "seduction", "dominate",
+	"dazed",
+}
+-- "polymorph" is matched as a prefix so "Polymorph (Chicken)" and the other
+-- rank variants are covered as well.
+local CC_NAME_PREFIXES = {
+	"polymorph",
+}
+
+local ccByName = {}
+for _, name in ipairs(CC_NAMES) do ccByName[name] = true end
+local lastCCAt = {}
+
+local function IsCrowdControlSpell(spellId, name, mechanics)
+	if name and not IsSecret(name) then
+		local n = strtrim(tostring(name)):lower()
+		if ccByName[n] then return true end
+		for _, p in ipairs(CC_NAME_PREFIXES) do
+			if n:sub(1, #p) == p then return true end
+		end
+	end
+	if mechanics and not IsSecret(mechanics) and type(mechanics) == "table" then
+		for i = 1, #mechanics do
+			local m = mechanics[i]
+			if m and not IsSecret(m) and CC_MECHANICS[m] then return true end
+		end
+	end
+	return false
+end
+
+local function OnCrowdControl(spellId, name)
+	local key = tostring(spellId or "") .. "|" .. tostring(name or "")
+	local now = GetTime()
+	if lastCCAt[key] and (now - lastCCAt[key]) < 1 then return end
+	lastCCAt[key] = now
+	Debug("crowd controlled: %s (%s)", name, spellId)
+	ns.TriggerEvent("CrowdControl")
+end
+
+local function RebuildProcLookups()
+	procById, procByName = {}, {}
+	procTargetById, procTargetByName = {}, {}
+	for _, id in ipairs(BUILTIN_PROC_IDS) do
+		procById[id] = true
+		local name = SpellNameById(id)
+		if name then procByName[strtrim(name):lower()] = true end
+	end
+	for _, name in ipairs(BUILTIN_PROC_NAMES) do
+		procByName[name] = true
+	end
+	for _, id in ipairs(BUILTIN_PROC_TARGET_IDS) do
+		procTargetById[id] = true
+		local name = SpellNameById(id)
+		if name then procTargetByName[strtrim(name):lower()] = true end
+	end
+	for _, name in ipairs(BUILTIN_PROC_TARGET_NAMES) do
+		procTargetByName[name] = true
+	end
+	for _, entry in ipairs(db.procSpells) do
+		local id = tonumber(entry)
+		if id then
+			procById[id] = true
+		else
+			procByName[strtrim(tostring(entry)):lower()] = true
+		end
+	end
+end
+ns.RebuildProcLookups = RebuildProcLookups
+
 local function MatchesProcSpell(spellId, name)
 	if spellId and not IsSecret(spellId) then
 		if procById[tonumber(spellId) or -1] then return true end
 	end
 	if name and not IsSecret(name) then
 		if procByName[strtrim(tostring(name)):lower()] then return true end
+	end
+	return false
+end
+
+-- Procs that land on the target (e.g. a mage's Frostbite root).
+local function MatchesProcTarget(spellId, name)
+	if spellId and not IsSecret(spellId) then
+		if procTargetById[tonumber(spellId) or -1] then return true end
+	end
+	if name and not IsSecret(name) then
+		if procTargetByName[strtrim(tostring(name)):lower()] then return true end
 	end
 	return false
 end
@@ -411,7 +620,8 @@ local function OnProcSpell(spellId, name)
 	ns.TriggerEvent("Proc")
 end
 
--- Full aura scan (fallback for clients without UNIT_AURA update info).
+-- Full aura scan (fallback for clients without UNIT_AURA update info, or
+-- when the client hides the update's aura list as a secret).
 local function ScanAuras()
 	if not (C_UnitAuras and C_UnitAuras.GetAuraDataByIndex) then return end
 	local seen = {}
@@ -427,6 +637,24 @@ local function ScanAuras()
 		i = i + 1
 	end
 	ns.lastAuraIds = seen
+
+	-- Harmful auras: CC effects (fear, root, stun, ...) on me.
+	local seenHarmful = {}
+	i = 1
+	while true do
+		local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, "HARMFUL")
+		if not ok or not aura then break end
+		local spellId, name = aura.spellId, aura.name
+		if not IsSecret(spellId) then seenHarmful[tonumber(spellId) or -1] = true end
+		if ns.lastAuraHarmfulIds and not ns.lastAuraHarmfulIds[tonumber(spellId) or -1] then
+			if EventHasSounds("CrowdControl")
+				and IsCrowdControlSpell(spellId, name, aura.mechanics) then
+				OnCrowdControl(spellId, name)
+			end
+		end
+		i = i + 1
+	end
+	ns.lastAuraHarmfulIds = seenHarmful
 end
 
 -- ---------------------------------------------------------------------------
@@ -437,7 +665,6 @@ local sessionHK          -- honorable kills this session (baseline)
 local readyAt = math.huge
 local pendingKill        -- my killing blow awaiting honor credit: { at, isPlayer, name }
 local lastKillAt = -math.huge
-local recentCritAt = -math.huge -- last crit seen through target combat text
 local streakTimes = {}
 local lastPlayerDamageAt = -math.huge -- last damage I took from an enemy player
 
@@ -476,16 +703,7 @@ local function RegisterStreak()
 	end
 end
 
--- Crit info is best-effort everywhere; crit == nil means "unknown".
-local function RecentCrit()
-	local now = GetTime()
-	if (now - recentCritAt) <= CRIT_WINDOW then
-		return true
-	end
-	return nil
-end
-
-local function ConfirmPlayerKill(crit)
+local function ConfirmPlayerKill()
 	local now = GetTime()
 	if (now - lastKillAt) < KILL_DEDUPE then
 		Debug("kill already sounded")
@@ -494,12 +712,8 @@ local function ConfirmPlayerKill(crit)
 	lastKillAt = now
 	pendingKill = nil
 
-	if crit and ns.PlayEvent("KillPlayerCrit") then
-		Debug("kill confirmed (crit)")
-	else
-		ns.PlayEvent("KillPlayer")
-		Debug("kill confirmed")
-	end
+	ns.PlayEvent("KillPlayer")
+	Debug("kill confirmed")
 	RegisterStreak()
 end
 
@@ -514,7 +728,7 @@ local function OnHonorableKillCredit(name)
 	local kill = pendingKill
 	if kill and (now - kill.at) <= KB_WINDOW then
 		-- My killing blow was pending: this credit confirms it was a player.
-		ConfirmPlayerKill(RecentCrit())
+		ConfirmPlayerKill()
 	else
 		-- No killing blow of ours on record. In a group with "only my killing
 		-- blows" on, this was someone else's kill. If the client simply can't
@@ -522,7 +736,7 @@ local function OnHonorableKillCredit(name)
 		if db.onlyMyKills and IsInGroup() then
 			Debug("group kill (not mine) - skipped")
 		else
-			ConfirmPlayerKill(RecentCrit())
+			ConfirmPlayerKill()
 		end
 	end
 end
@@ -540,7 +754,7 @@ local function OnMyKillingBlow(isPlayer, name)
 	-- isPlayer == true: certainly a player, play right away.
 	-- isPlayer == nil:  wait briefly for honor credit to confirm.
 	if isPlayer then
-		ConfirmPlayerKill(RecentCrit())
+		ConfirmPlayerKill()
 	else
 		pendingKill = { at = now, name = name }
 		pcall(function()
@@ -641,7 +855,6 @@ end
 -- ---------------------------------------------------------------------------
 
 local usesCombatLog = false
-local recentCritByVictim = {}   -- victim GUID -> time of my last critical hit
 local pendingCritByVictim = {}  -- victim GUID -> time (for non-fatal crit sounds)
 
 -- Position of the "critical" flag inside the suffix of damage subevents.
@@ -690,13 +903,29 @@ local function ParseCLEU()
 	end
 
 	if isSilence then
-		-- A debuff I applied: is it one of the interrupt/silence spells?
-		if IsMyGUID(srcGUID) and dstGUID ~= playerGUID then
-			local spellId, spellName, _, auraType = select(prefix + 1, CombatLogGetCurrentEventInfo())
-			if auraType == "DEBUFF" and IsInterruptOrSilenceSpell(spellId, spellName) then
-				Debug("silence landed (combat log): %s", spellName)
-				ns.TriggerEvent("Interrupt")
+		local spellId, spellName, _, auraType = select(prefix + 1, CombatLogGetCurrentEventInfo())
+		if IsMyGUID(srcGUID) then
+			-- A debuff I applied: is it one of the interrupt/silence spells?
+			if auraType == "DEBUFF" and dstGUID ~= playerGUID then
+				if IsInterruptOrSilenceSpell(spellId, spellName) then
+					Debug("silence landed (combat log): %s", spellName)
+					ns.TriggerEvent("Interrupt")
+				end
 			end
+			-- Procs I applied: on myself (self buffs) or on someone else
+			-- (Frostbite's root, weapon enchants).
+			if EventHasSounds("Proc") and GetTime() >= readyAt then
+				if dstGUID == playerGUID then
+					if MatchesProcSpell(spellId, spellName) then OnProcSpell(spellId, spellName) end
+				elseif MatchesProcTarget(spellId, spellName) then
+					OnProcSpell(spellId, spellName)
+				end
+			end
+		end
+		-- A CC effect (fear, root, stun, ...) that landed on me.
+		if dstGUID == playerGUID and GetTime() >= readyAt
+			and EventHasSounds("CrowdControl") and IsCrowdControlSpell(spellId, spellName) then
+			OnCrowdControl(spellId, spellName)
 		end
 		return
 	end
@@ -710,10 +939,7 @@ local function ParseCLEU()
 				isPlayer = (bit.band(dstFlags, flagPlayer) ~= 0) or nil
 			end
 		end
-		-- Was the killing blow a crit?
-		local crit
-		local at = recentCritByVictim[dstGUID or ""]
-		if at and (GetTime() - at) <= CRIT_WINDOW then crit = true end
+		-- The victim died: cancel any pending non-fatal crit sound for it.
 		pendingCritByVictim[dstGUID or ""] = nil
 
 		if isPlayer == false then
@@ -724,11 +950,7 @@ local function ParseCLEU()
 		local now = GetTime()
 		if (now - lastKillAt) < KILL_DEDUPE then return end
 		lastKillAt = now
-		if crit and ns.PlayEvent("KillPlayerCrit") then
-			-- crit kill sound played
-		else
-			ns.PlayEvent("KillPlayer")
-		end
+		ns.PlayEvent("KillPlayer")
 		RegisterStreak()
 		return
 	end
@@ -745,7 +967,6 @@ local function ParseCLEU()
 	if not critical then return end
 
 	local victim = dstGUID or ""
-	recentCritByVictim[victim] = GetTime()
 	if VictimIsPlayer(dstGUID) then
 		local at = GetTime()
 		if not pendingCritByVictim[victim] then
@@ -790,16 +1011,14 @@ local function OnCombatText(messageType)
 	-- with the default (watching yourself) DAMAGE_CRIT means YOU were crit.
 	if not (db and db.watchTargetText) then return end
 	if messageType ~= "DAMAGE_CRIT" and messageType ~= "SPELL_DAMAGE_CRIT" then return end
-	recentCritAt = GetTime()
-
+	Debug("combat text: crit on target (%s)", messageType)
 	local ok, isPlayer = pcall(UnitIsPlayer, "target")
 	if ok and type(isPlayer) == "boolean" and not IsSecret(isPlayer) then
 		if isPlayer then
 			ns.TriggerEvent("CritPlayer")
 		end
 	else
-		-- Can't tell what the target is: still refresh the crit marker for
-		-- critical-kill detection, but don't play the crit hit sound.
+		-- Can't tell what the target is: don't play the crit hit sound.
 		Debug("target type hidden (secret)")
 	end
 end
@@ -841,7 +1060,7 @@ function handlers.PLAYER_ENTERING_WORLD()
 	sessionHK = GetSessionHK()
 	pendingKill = nil
 	streakTimes = {}
-	recentCritByVictim, pendingCritByVictim = {}, {}
+	pendingCritByVictim = {}
 	lastPlayerDamageAt = -math.huge
 	pendingInterruptAt = -math.huge
 	pendingChannelAt = nil
@@ -862,6 +1081,7 @@ function handlers.PLAYER_DEAD()
 end
 
 function handlers.PARTY_KILL(attackerGUID, targetGUID)
+	if ns.canCombatLog then return end -- the combat-log path owns kill detection there
 	if GetTime() < readyAt then return end
 	if IsMyGUID(attackerGUID) then
 		local isPlayer = VictimIsPlayer(targetGUID)
@@ -908,22 +1128,48 @@ function handlers.CHAT_MSG_COMBAT_HONOR_GAIN()
 	end)
 end
 
+-- The added-aura list of a UNIT_AURA update is a plain table on normal
+-- clients, but on restricted engines it can be a SECRET value when the
+-- update contains restricted data. type() reports the underlying type for
+-- secrets, so IsSecret must be checked before the list is usable.
+local function AddedAuras(updateInfo)
+	local ok, added = pcall(function()
+		if type(updateInfo) ~= "table" then return nil end
+		local a = updateInfo.addedAuras
+		if a and not IsSecret(a) and type(a) == "table" then return a end
+		return nil
+	end)
+	if ok and added then return added end
+	return nil
+end
+
 function handlers.UNIT_AURA(unit, updateInfo)
 	if not db or not db.enabled then return end
 
 	if unit == "player" then
-		-- Procs: tracked buffs applied to me.
-		if not next(db.procSpells) then return end
+		-- Procs: tracked buffs applied to me. Crowd control: fears, roots,
+		-- stuns, polymorphs etc. applied to me.
+		local checkProc = EventHasSounds("Proc")
+		local checkCC = EventHasSounds("CrowdControl")
+		if not (checkProc or checkCC) then return end
+		-- Ignore auras already present at login (passives and the like);
+		-- only newly gained auras count.
+		if GetTime() < readyAt then return end
 
-		-- New-or-refreshed auras are handed to us directly on modern clients.
-		if type(updateInfo) == "table" and type(updateInfo.addedAuras) == "table" then
-			for _, aura in ipairs(updateInfo.addedAuras) do
+		-- New-or-refreshed auras are handed to us directly on modern clients;
+		-- when the client hides them, fall back to a full aura scan.
+		local added = AddedAuras(updateInfo)
+		if added then
+			for _, aura in ipairs(added) do
 				local ok, err = pcall(function()
 					-- Check IsSecret BEFORE any truthiness test: boolean secrets
 					-- may not be tested directly.
 					if IsSecret(aura.isHarmful) then return end
-					if aura.isHarmful then return end
-					if MatchesProcSpell(aura.spellId, aura.name) then
+					if aura.isHarmful then
+						if checkCC and IsCrowdControlSpell(aura.spellId, aura.name, aura.mechanics) then
+							OnCrowdControl(aura.spellId, aura.name)
+						end
+					elseif checkProc and MatchesProcSpell(aura.spellId, aura.name) then
 						OnProcSpell(aura.spellId, aura.name)
 					end
 				end)
@@ -936,26 +1182,67 @@ function handlers.UNIT_AURA(unit, updateInfo)
 	end
 
 	if unit == "target" then
-		-- Silences I applied to my target (modern clients without a combat log).
-		if ns.canCombatLog or not EventHasSounds("Interrupt") then return end
-		if type(updateInfo) ~= "table" or type(updateInfo.addedAuras) ~= "table" then return end
-		for _, aura in ipairs(updateInfo.addedAuras) do
+		-- Silences I applied to my target, plus target-side procs
+		-- (modern clients without a combat log).
+		if ns.canCombatLog or (not EventHasSounds("Interrupt") and not EventHasSounds("Proc")) then return end
+		local added = AddedAuras(updateInfo)
+		if not added then return end
+		for _, aura in ipairs(added) do
 			local ok, err = pcall(function()
 				if IsSecret(aura.isHarmful) then return end
-				if not aura.isHarmful then return end
 				local source = aura.sourceUnit
 				local mine = source and not IsSecret(source)
 					and (source == "player" or source == "pet" or source == "vehicle")
 				if not mine and aura.sourceGUID then
 					mine = IsMyGUID(aura.sourceGUID)
 				end
-				if mine and IsInterruptOrSilenceSpell(aura.spellId, aura.name) then
-					Debug("silence landed: %s", aura.name)
-					ns.TriggerEvent("Interrupt")
+				if mine then
+					if aura.isHarmful and EventHasSounds("Interrupt")
+						and IsInterruptOrSilenceSpell(aura.spellId, aura.name) then
+						Debug("silence landed: %s", aura.name)
+						ns.TriggerEvent("Interrupt")
+					end
+					-- Procs that land on the target: harmful ones (Frostbite's
+					-- root, CC procs, weapon enchant procs) and helpful ones.
+					if EventHasSounds("Proc") and GetTime() >= readyAt
+						and MatchesProcTarget(aura.spellId, aura.name) then
+						OnProcSpell(aura.spellId, aura.name)
+					end
 				end
 			end)
 			if not ok then Debug("target aura error: %s", err) end
 		end
+		return
+	end
+
+	-- Friendly units: helpful procs I applied to them (helpful target procs
+	-- land on the spell's recipient, who is usually not the current target).
+	-- (Combat-log clients handle this in ParseCLEU.)
+	if ns.canCombatLog then return end
+	if not EventHasSounds("Proc") then return end
+	if GetTime() < readyAt then return end
+	local added = AddedAuras(updateInfo)
+	if not added then return end
+	-- Only friendly unit IDs can carry helpful auras from me; skip enemy
+	-- NPCs and world objects before doing any work.
+	if unit ~= "pet" and unit ~= "vehicle" and unit ~= "focus"
+		and not unit:find("^party%d+$", 1) and not unit:find("^raid%d+$", 1)
+		and not unit:find("^friend%d+$", 1) then return end
+	for _, aura in ipairs(added) do
+		local ok, err = pcall(function()
+			if IsSecret(aura.isHarmful) then return end
+			if aura.isHarmful then return end
+			local source = aura.sourceUnit
+			local mine = source and not IsSecret(source)
+				and (source == "player" or source == "pet" or source == "vehicle")
+			if not mine and aura.sourceGUID then
+				mine = IsMyGUID(aura.sourceGUID)
+			end
+			if mine and MatchesProcTarget(aura.spellId, aura.name) then
+				OnProcSpell(aura.spellId, aura.name)
+			end
+		end)
+		if not ok then Debug("aura error: %s", err) end
 	end
 end
 
@@ -1055,19 +1342,29 @@ for _, event in ipairs({
 	TryRegister(event)
 end
 
--- Auras: procs on the player, silences on the target.
-TryRegisterUnitEvent("UNIT_AURA", "player", "target")
+-- Auras: procs on the player, silences and target-side procs on the target,
+-- and friendly procs (like the Priest's Inspiration) on party, raid, focus
+-- and friend units. A global registration covers all of them; clients that
+-- only offer per-unit registration get the player and the target.
+if not pcall(F.RegisterEvent, F, "UNIT_AURA") then
+	TryRegisterUnitEvent("UNIT_AURA", "player")
+	TryRegisterUnitEvent("UNIT_AURA", "target")
+end
 
--- Client-dependent signals. Registration itself is the capability check:
--- the modern client forbids the combat log, classic clients have no
--- PARTY_KILL UI event.
-ns.canPartyKill = TryRegister("PARTY_KILL")
+-- Client-dependent signals. On the modern engine the combat log is forbidden
+-- to addons (registering it triggers the protected-action popup) but Blizzard's
+-- dedicated PARTY_KILL event is available; Classic-family clients are the
+-- other way around.
+ns.canPartyKill = false
+usesCombatLog = false
 if IS_MODERN then
-	ns.canPartyKill = ns.canPartyKill == true
-	usesCombatLog = false
+	ns.canPartyKill = TryRegister("PARTY_KILL")
 else
-	ns.canPartyKill = false
-	usesCombatLog = TryRegister("COMBAT_LOG_EVENT_UNFILTERED")
+	-- Never attempt the combat log registration on a restricted engine, even
+	-- if the interface number was not what we expected.
+	if not HAS_RESTRICTED_ENGINE then
+		usesCombatLog = TryRegister("COMBAT_LOG_EVENT_UNFILTERED")
+	end
 end
 ns.canCombatLog = usesCombatLog
 ns.canHKCredit = TryRegister("PLAYER_PVP_KILLS_CHANGED")
@@ -1087,7 +1384,7 @@ end
 local function KillSoundsAvailable(eventKey)
 	if eventKey == "KillPlayer" or eventKey == "KillNPC" then
 		return ns.canPartyKill or ns.canCombatLog or ns.canHKCredit
-	elseif eventKey == "KillPlayerCrit" or eventKey == "CritPlayer" then
+	elseif eventKey == "CritPlayer" then
 		if ns.canCombatLog then return true, "combat log" end
 		if db and db.watchTargetText then return true, "watch target (experimental)" end
 		return false, "needs 'Watch my target' or a combat-log client"
@@ -1102,6 +1399,8 @@ local function KillSoundsAvailable(eventKey)
 		return false, "no interrupt signal on this client"
 	elseif eventKey == "Proc" then
 		return true
+	elseif eventKey == "CrowdControl" then
+		return true, "aura data (CC effect type and name)"
 	elseif eventKey == "Streak2" or eventKey == "Streak3" or eventKey == "Streak4" or eventKey == "Streak5" then
 		return ns.canPartyKill or ns.canCombatLog or ns.canHKCredit
 	end
@@ -1128,7 +1427,7 @@ local function DescribeCapabilities()
 	table.insert(lines, "Combat log: " .. (ns.canCombatLog and "|cff00ff00available|r (full kill + crit detection)" or "|cffff8040not available to addons|r"))
 	table.insert(lines, "PARTY_KILL event: " .. (ns.canPartyKill and "|cff00ff00available|r" or "|cffff8040unavailable|r"))
 	table.insert(lines, "Honorable kill credit: " .. (ns.canHKCredit and "|cff00ff00available|r" or "|cffff8040unavailable|r"))
-	local ok, how = KillSoundsAvailable("KillPlayerCrit")
+	local ok, how = KillSoundsAvailable("CritPlayer")
 	table.insert(lines, "Crit detection: " .. (ok and ("|cff00ff00" .. how .. "|r") or ("|cffff8040" .. how .. "|r")))
 	return lines
 end
@@ -1148,6 +1447,13 @@ end
 
 local function SetEnabled(value)
 	db.enabled = value and true or false
+	-- The master switch drives every event's enabled state as well.
+	if type(db.events) == "table" then
+		for _, event in ipairs(ns.EVENTS) do
+			local ev = db.events[event.key]
+			if type(ev) == "table" then ev.enabled = db.enabled end
+		end
+	end
 	if ns.RefreshOptions then ns.RefreshOptions() end
 end
 ns.SetEnabled = SetEnabled
