@@ -1,0 +1,14 @@
+## Interface: 16001, 120100, 120105, 11509, 20506, 38002, 50504
+## Title: Tagaria SoundFX
+## Notes: Play your own .mp3/.wav sounds when you kill players, land crits, die, proc and more.
+## Author: 0xAnakin
+## Version: 1.0.0
+## SavedVariables: TagariaSoundFXDB
+## IconTexture: Interface\Icons\INV_Misc_Drum_01
+## AddonCompartmentFunc: TagariaSoundFX_OnCompartmentClick
+## AddonCompartmentFuncOnEnter: TagariaSoundFX_OnCompartmentEnter
+## AddonCompartmentFuncOnLeave: TagariaSoundFX_OnCompartmentLeave
+## X-Category: PvP
+
+Core.lua
+Options.lua
